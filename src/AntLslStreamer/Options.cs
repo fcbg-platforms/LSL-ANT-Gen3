@@ -24,6 +24,7 @@ internal sealed class Options
     public string? SourceId { get; private set; }
     public bool Markers { get; private set; } = true;
     public bool KeepVolts { get; private set; }
+    public bool Stim { get; private set; } = true;
 
     // ---- simulator ----
     public string? SimFile { get; private set; }
@@ -60,6 +61,7 @@ internal sealed class Options
           -n, --name <name>          LSL stream name (default: "eego <model> <serial>")
           --source-id <id>           LSL source id (default: "ANT-eego-<serial>")
           --no-markers               Do not create the trigger marker stream
+          --no-stim                  Do not add the STIM trigger channel to the EEG stream
           --volts                    Stream raw volts instead of microvolts
           --sim <file.cnt>           Use the EDI2 file simulator with this .cnt file instead of USB
           --sim-type <EE_xxx>        Amplifier type reported by the simulator (default: EE_225)
@@ -110,6 +112,7 @@ internal sealed class Options
                 case "--source-id": o.SourceId = Next(); break;
                 case "--no-markers": o.Markers = false; break;
                 case "--volts": o.KeepVolts = true; break;
+                case "--no-stim": o.Stim = false; break;
                 case "--sim": o.SimFile = Path.GetFullPath(Next()); break;
                 case "--sim-type": o.SimType = Next(); break;
                 case "-d": case "--duration": o.Duration = NextDouble(); break;

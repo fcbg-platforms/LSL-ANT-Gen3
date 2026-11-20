@@ -352,6 +352,8 @@ internal sealed class Streamer
             };
             channels.Add(new StreamChannel(label, type, unit, c.ChannelIndex, scale));
         }
+        // Trigger codes as an extra last channel: the code at the trigger's sample, 0 elsewhere.
+        if (_opt.Stim) channels.Add(StreamChannel.Stim());
 
         var sp = new StreamParams
         {
@@ -429,13 +431,15 @@ internal sealed class Streamer
             lastData.Restart();
 
             int nch = channels.Count;
+            int stimIdx = channels.FindIndex(c => c.IsStim);       // -1 if there is no STIM channel
+            int dataCh = stimIdx >= 0 ? nch - 1 : nch;              // channels coming from the amplifier
             int total = eegFrames.Sum(f => f.Values.GetLength(1));
 
             // Create (or re-use after a reconnect) the outlet once we know the real frame layout.
             int rows = eegFrames[0].Values.GetLength(0);
-            if (rows != nch && !warnedRowMismatch)
+            if (rows != dataCh && !warnedRowMismatch)
             {
-                Log.Warn($"Amplifier delivers {rows} rows but {nch} channels were requested; streaming the first {Math.Min(rows, nch)}.");
+                Log.Warn($"Amplifier delivers {rows} rows but {dataCh} channels were requested; streaming the first {Math.Min(rows, dataCh)}.");
                 warnedRowMismatch = true;
             }
             EnsureOutlets(name, sourceId, channels, device);
@@ -447,32 +451,62 @@ internal sealed class Streamer
             foreach (var f in eegFrames)
             {
                 var m = f.Values;
-                int ns = m.GetLength(1), nr = Math.Min(m.GetLength(0), nch);
+                int ns = m.GetLength(1), nr = Math.Min(m.GetLength(0), dataCh);
                 for (int s = 0; s < ns; s++)
                 {
                     int o = (s0 + s) * nch;
                     for (int r = 0; r < nr; r++) buffer[o + r] = (float)(m.At(r, s) * channels[r].Scale);
-                    for (int r = nr; r < nch; r++) buffer[o + r] = float.NaN;
+                    for (int r = nr; r < dataCh; r++) buffer[o + r] = float.NaN;
+                    if (stimIdx >= 0) buffer[o + stimIdx] = 0f;
                 }
                 s0 += ns;
             }
+
+            // Trigger markers: written into the STIM channel of this chunk (before it is pushed) and
+            // sent on the marker stream. "now" is the LSL time of the chunk's last sample.
+            double firstSampleLsl = now - (total - 1) / rate;
+            s0 = 0;
+            foreach (var f in eegFrames)
+            {
+                int ns = f.Values.GetLength(1);
+                double frameStartLsl = firstSampleLsl + s0 / rate;
+                double frameDuration = ns / rate;
+                if (f.TimeMarkers != null)
+                    foreach (var tm in f.TimeMarkers)
+                    {
+                        var marker = HandleMarker(tm, f, frameStartLsl, frameDuration, now);
+                        if (marker is not { } mk || stimIdx < 0) continue;
+                        int idx = (int)Math.Round((mk.Timestamp - firstSampleLsl) * rate);
+                        if (idx < 0)
+                        {
+                            Log.Warn($"Trigger {mk.Code} belongs to an earlier chunk ({-idx} samples before this one); " +
+                                     "it is on the marker stream but not in the STIM channel.");
+                            continue;
+                        }
+                        idx = Math.Min(idx, total - 1);
+                        // Two triggers on the same sample: move the later one to the next free sample so
+                        // that neither is lost (the marker stream keeps the exact time).
+                        int free = idx;
+                        while (free < total && buffer[free * nch + stimIdx] != 0) free++;
+                        if (free == total)
+                        {
+                            free = idx; // at the end of the chunk: look earlier instead
+                            while (free >= 0 && buffer[free * nch + stimIdx] != 0) free--;
+                        }
+                        if (free < 0)
+                        {
+                            Log.Warn($"Trigger {mk.Code}: no free STIM sample in this chunk; it is only on the marker stream.");
+                            continue;
+                        }
+                        if (free != idx)
+                            Log.Warn($"Trigger {mk.Code} shares a sample with another trigger; written {free - idx:+0;-0} sample(s) away in STIM.");
+                        buffer[free * nch + stimIdx] = mk.Code;
+                    }
+                s0 += ns;
+            }
+
             // The newest sample was received "now"; LSL back-computes the earlier stamps from the nominal rate.
             _outlets!.PushChunk(buffer, total, now);
-
-            // Trigger markers.
-            if (_outlets.HasMarkers)
-            {
-                s0 = 0;
-                foreach (var f in eegFrames)
-                {
-                    int ns = f.Values.GetLength(1);
-                    double frameStartLsl = now - (total - 1 - s0) / rate;
-                    double frameDuration = ns / rate;
-                    if (f.TimeMarkers != null)
-                        foreach (var tm in f.TimeMarkers) HandleMarker(tm, f, frameStartLsl, frameDuration, now);
-                    s0 += ns;
-                }
-            }
 
             _samples += total;
             statSamples += total;
@@ -505,14 +539,16 @@ internal sealed class Streamer
         Log.Info("Channels: " + string.Join(", ", channels.Select(c => c.Label)));
     }
 
-    private void HandleMarker(TimeMarker tm, AmplifierFrame frame, double frameStartLsl, double frameDuration, double now)
+    /// <summary>Publishes a new trigger on the marker stream. Returns its code and LSL timestamp, or null for a repeat.</summary>
+    private (int Code, double Timestamp)? HandleMarker(TimeMarker tm, AmplifierFrame frame, double frameStartLsl,
+        double frameDuration, double now)
     {
         var key = (tm.Start.UtcTicks + tm.Offset.Ticks, tm.TimeMarkerCode);
         long nowMs = _clock.ElapsedMilliseconds;
         if (_seenMarkers.TryGetValue(key, out long seenAt) && nowMs - seenAt < MarkerDedupWindowMs)
         {
             _seenMarkers[key] = nowMs; // still being repeated; keep the entry alive
-            return;
+            return null;
         }
         _seenMarkers[key] = nowMs;
         if (_seenMarkers.Count > 1024)
@@ -530,7 +566,10 @@ internal sealed class Streamer
 
         _outlets!.PushMarker(text, ts);
         _markers++;
-        Log.Debug($"Trigger {text} at {ts:F4}");
+        Log.Debug($"Trigger {text} at {ts:F4} (marker start {tm.Start:HH:mm:ss.ffffff}, offset {tm.Offset.TotalMilliseconds} ms, " +
+                  $"frame start {frame.Start:HH:mm:ss.ffffff}, rel {rel * 1000:F1} ms, frame {frameDuration * 1000:F0} ms, " +
+                  $"{(ts == now ? "FALLBACK arrival time" : "amplifier time")})");
+        return (tm.TimeMarkerCode, ts);
     }
 
     private static string FormatRanges(IEnumerable<int> values)

@@ -4,7 +4,13 @@ using System.Runtime.InteropServices;
 namespace AntLslStreamer;
 
 /// <summary>Description of one channel in the outgoing LSL stream.</summary>
-internal sealed record StreamChannel(string Label, string Type, string Unit, int AmplifierIndex, double Scale);
+internal sealed record StreamChannel(string Label, string Type, string Unit, int AmplifierIndex, double Scale)
+{
+    /// <summary>Trigger channel built from the amplifier's trigger events (not an amplifier input).</summary>
+    public bool IsStim => AmplifierIndex < 0;
+
+    public static StreamChannel Stim() => new("STIM", "STIM", "none", -1, 1.0);
+}
 
 /// <summary>Device / acquisition information written into the LSL stream metadata.</summary>
 internal sealed record DeviceDescription(string Model, string Serial, double SamplingRate,
@@ -43,7 +49,8 @@ internal sealed class LslOutlets : IDisposable
             Lsl.lsl_append_child_value(ch, "label", c.Label);
             Lsl.lsl_append_child_value(ch, "unit", c.Unit);
             Lsl.lsl_append_child_value(ch, "type", c.Type);
-            Lsl.lsl_append_child_value(ch, "amplifier_index", c.AmplifierIndex.ToString(CultureInfo.InvariantCulture));
+            if (!c.IsStim)
+                Lsl.lsl_append_child_value(ch, "amplifier_index", c.AmplifierIndex.ToString(CultureInfo.InvariantCulture));
         }
 
         if (device.Cap != null)

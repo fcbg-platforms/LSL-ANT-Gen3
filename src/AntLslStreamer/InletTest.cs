@@ -33,11 +33,13 @@ internal static class InletTest
         double srate = Lsl.lsl_get_nominal_srate(info);
 
         IntPtr inlet = Lsl.lsl_create_inlet(info, 360, 0, 1);
+        int stimCh = -1;
         IntPtr fullInfo = Lsl.lsl_get_fullinfo(inlet, 5.0, out int ec);
         if (ec == 0 && fullInfo != IntPtr.Zero)
         {
             string xml = Lsl.TakeString(Lsl.lsl_get_xml(fullInfo));
             var labels = Regex.Matches(xml, "<label>(.*?)</label>").Select(m => m.Groups[1].Value).ToList();
+            stimCh = labels.IndexOf("STIM");
             var unit = Regex.Match(xml, "<unit>(.*?)</unit>").Groups[1].Value;
             var model = Regex.Match(xml, "<model>(.*?)</model>").Groups[1].Value;
             var cap = Regex.Match(xml, "<cap>.*?<name>(.*?)</name>", RegexOptions.Singleline).Groups[1].Value;
@@ -65,7 +67,7 @@ internal static class InletTest
         int maxSamples = 4096;
         var data = new float[maxSamples * nch];
         var ts = new double[maxSamples];
-        long total = 0, markers = 0;
+        long total = 0, markers = 0, stimEvents = 0;
         double firstTs = double.NaN, lastTs = double.NaN, maxGap = 0;
         int showCh = nch;
         var sum = new double[showCh];
@@ -84,6 +86,11 @@ internal static class InletTest
                 if (double.IsNaN(firstTs)) firstTs = ts[s];
                 else maxGap = Math.Max(maxGap, ts[s] - lastTs);
                 lastTs = ts[s];
+                if (stimCh >= 0 && data[s * nch + stimCh] != 0)
+                {
+                    stimEvents++;
+                    Log.Info($"  STIM {data[s * nch + stimCh]} at {ts[s]:F4}");
+                }
                 for (int c = 0; c < showCh; c++)
                 {
                     double v = data[s * nch + c];
@@ -110,7 +117,8 @@ internal static class InletTest
 
         double span = lastTs - firstTs;
         Log.Info("---- inlet summary ----");
-        Log.Info($"samples: {total} in {sw.Elapsed.TotalSeconds:F1} s wall clock; markers: {markers}");
+        Log.Info($"samples: {total} in {sw.Elapsed.TotalSeconds:F1} s wall clock; markers: {markers}" +
+                 (stimCh >= 0 ? $"; STIM events: {stimEvents}" : "; no STIM channel"));
         if (total > 1)
         {
             Log.Info($"timestamp span {span:F3} s -> measured rate {(total - 1) / span:F2} Hz (nominal {srate} Hz), " +

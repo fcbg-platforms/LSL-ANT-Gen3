@@ -11,13 +11,26 @@ EDI2 file simulator.
 
 | Stream | Type | Format | Content |
 |---|---|---|---|
-| `eego <model> <serial>` | `EEG` | float32, nominal rate = sampling rate | One channel per active amplifier channel, in **microvolts** (`--volts` for volts) |
+| `eego <model> <serial>` | `EEG` | float32, nominal rate = sampling rate | One channel per active amplifier channel, in **microvolts** (`--volts` for volts), plus a last `STIM` trigger channel |
 | `eego <model> <serial> Markers` | `Markers` | string, irregular | Trigger codes from the amplifier's trigger input (e.g. `"128"`) |
 
 - `source_id` = `ANT-eego-<serial>` (markers: `ANT-eego-<serial>-markers`), so inlets reconnect automatically.
 - Stream metadata (`desc`) has `channels/channel/{label,unit,type,amplifier_index}` and
   `acquisition/{manufacturer,model,serial_number,input_ranges_volts,...}`.
-- Channel types: `EEG` (referential), `BIP` (bipolar), `AUX` (auxiliary).
+- Channel types: `EEG` (referential), `BIP` (bipolar), `AUX` (auxiliary), `STIM` (trigger).
+
+### STIM channel
+
+The last channel of the EEG stream, labelled `STIM` with type `STIM` (unit `none`), holds the trigger
+codes. It is 0 everywhere except at the sample where a trigger occurred, which holds the trigger code
+(e.g. 128). EDI2 reports only the onset of each code, not the return to 0, so **each trigger is a
+one-sample pulse**. The same triggers are also on the `Markers` stream, with the identical timestamp.
+Use `--no-stim` to leave the channel out.
+
+- **MNE-Python:** use `mne.find_events(raw, stim_channel="STIM", shortest_event=1)`. The default
+  `shortest_event=2` rejects one-sample pulses.
+- If two triggers fall on the same sample, the later one is written to the nearest free sample (a
+  warning is logged). The marker stream keeps the exact time.
 - Timestamps: each chunk is stamped with `lsl_local_clock()` at arrival, and LSL back-computes
   earlier samples from the nominal rate. For best timing, enable LSL dejitter on the inlet side
   (LabRecorder/XDF importers do this by default).
@@ -65,7 +78,8 @@ Options (`AntLslStreamer help` lists all of them):
 | `--labels <file>` | Channel labels, one per line (or comma separated), in stream order. Takes precedence over `--cap`. Default `EEG1..`, `BIP1..` |
 | `--serial <serial>` | Choose an amplifier when several are connected |
 | `-n, --name`, `--source-id` | Override LSL name / source id |
-| `--no-markers` | Do not create the trigger stream |
+| `--no-markers` | Do not create the trigger marker stream |
+| `--no-stim` | Do not add the `STIM` trigger channel to the EEG stream |
 | `--volts` | Stream volts instead of µV |
 | `--sim <file.cnt> [--sim-type EE_225]` | Use the EDI2 file simulator instead of USB (e.g. `sim\trigger_test.cnt`) |
 | `-d, --duration <s>` | Stop after N seconds |
@@ -196,11 +210,34 @@ The zip contains ANT's SDK libraries. Check ANT's SDK license before sharing it 
 - `InletTest.cs`: test inlet (`inlet` command).
 - `Options.cs`: command-line parsing.
 
+## Trigger test
+
+Tested on 2026-11-20 with the EE-225 at 500 Hz. An Arduino on COM5 converts serial bytes into TTL
+levels on the amplifier's trigger port. The test sent codes 1, 2, 3 and 128 in a loop (each 0.5 s high,
+then 0.5 s at 0), 40 triggers in total, and logged the LSL clock time of each serial write.
+
+| Check | Result |
+|---|---|
+| Markers received | 40 of 40, codes and order correct, no duplicates, no markers for the return to 0 |
+| Marker timestamp source | Amplifier clock for all 40 (no fallback to arrival time). Marker times fall exactly on EEG sample times |
+| Marker time minus send time | 6.1 ms mean, 1.0 ms SD (4.8 to 8.4 ms) |
+| Interval between consecutive markers vs. send intervals | 1.1 ms SD |
+| EEG during the test | 499.98 Hz measured, max timestamp gap 4.9 ms |
+
+A second run with the STIM channel (same 40 triggers): the STIM channel had 40 events with the codes
+in the order sent. Each was on the same sample as its marker (0 ms difference) and 6.7 ms after the
+send on average (0.7 ms SD).
+
+The 1 ms jitter matches the 2 ms sample period at 500 Hz plus serial-port jitter. To repeat the test,
+run the streamer with `ANTLSL_DEBUG=1`: it logs each trigger's amplifier timestamps and whether the
+amplifier clock was used.
+
 ## Known limitations / not yet verified
 
-- **Hardware triggers were not tested** (no trigger source was connected); they were only verified with the
-  simulator. Marker timestamps come from the marker time relative to the frame start in amplifier time,
-  with the arrival time as a fallback. Check them against a known trigger source before relying on them
-  for precise timing.
+- Triggers are reported only when the trigger input changes to a non-zero code. Returning to 0 produces
+  no marker and no STIM value. A change directly from one code to another (without 0 in between) was not tested.
+- The constant latency between sending a trigger and its marker timestamp (about 6 ms in the test above)
+  includes the serial/Arduino delay and the amplifier-to-PC delay. Measure it for your setup if you
+  align markers with other LSL streams to better than 10 ms.
 - Impedance mode is not exposed. Check impedances with the eego software before streaming.
 - Only one amplifier is streamed. Cascaded (multi-amplifier) setups are not configured.

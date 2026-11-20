@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AssemblyName>AntLslStreamer</AssemblyName>
+    <RootNamespace>AntLslStreamer</RootNamespace>
+    <EdiNugetVersion>2.0.2.1355</EdiNugetVersion>
+    <NoWarn>CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ES.CtkInterface_Release" Version="$(EdiNugetVersion)" />
+    <PackageReference Include="ES.CtkImpl_Release" Version="$(EdiNugetVersion)" />
+    <PackageReference Include="ES.DeviceDataModel_Release" Version="$(EdiNugetVersion)" />
+    <PackageReference Include="ES.EdiImpl_Release" Version="$(EdiNugetVersion)" />
+    <PackageReference Include="ES.EdiInterface_Release" Version="$(EdiNugetVersion)" />
+    <PackageReference Include="Grpc.Core" Version="2.46.6" />
+    <PackageReference Include="Grpc.Core.Api" Version="2.46.6" />
+    <PackageReference Include="Google.Protobuf" Version="3.27.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="native/lsl.dll" Link="lsl.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="lsl_api.cfg" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

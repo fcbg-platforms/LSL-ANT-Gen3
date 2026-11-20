@@ -98,17 +98,95 @@ EDI2 writes its own log to `%LOCALAPPDATA%\AntLslStreamer\logs`. Set `ANTLSL_DEB
 
 ## Build
 
+### 1. Install the tools
+
+- Windows 10/11 x64.
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (x64). Check with `dotnet --list-sdks`,
+  which should list an `8.0.x` version. The SDK includes the runtime, so nothing else is needed to build.
+- Git, to clone the repository.
+
+### 2. Get the code
+
 ```powershell
-dotnet publish src\AntLslStreamer -c Release -o dist
+git clone https://github.com/fcbg-platforms/LSL-ANT-Gen3.git
+cd LSL-ANT-Gen3
 ```
 
-The ANT EDI2 SDK is **not in this repository** (`SDK/` is git-ignored: it is proprietary and too
-large). Before building, copy the SDK you received from ANT into `SDK/`, so that the NuGet packages
-are at `SDK\DDE-OP-0590ver2.0.2.1355 EDI Binaries NuPkg\*.nupkg`. `nuget.config` points NuGet at
-that folder. Without it, `dotnet restore` fails to find the `ES.*_Release` packages. The simulator
-test files the app uses are already in `sim/`.
-liblsl (`lsl.dll`, v1.16, x64) is in `src\AntLslStreamer\native`. Replace it with a newer
-[liblsl release](https://github.com/sccn/liblsl/releases) if you want.
+Use a short path (e.g. `C:\git\LSL-ANT-Gen3`). ANT notes that long paths can make NuGet restore fail.
+
+### 3. Add the ANT EDI2 SDK
+
+The SDK is **not in this repository**: `SDK/` is git-ignored because it is proprietary and too large.
+Copy the SDK folder you received from ANT (version 2.0.2.1355) into the repository root as `SDK/`.
+The build only needs the NuGet packages, which must end up here:
+
+```
+LSL-ANT-Gen3\
+  SDK\
+    DDE-OP-0590ver2.0.2.1355 EDI Binaries NuPkg\
+      ES.CtkImpl_Release.2.0.2.1355.nupkg
+      ES.CtkInterface_Release.2.0.2.1355.nupkg
+      ES.DeviceDataModel_Release.2.0.2.1355.nupkg
+      ES.EdiImpl_Release.2.0.2.1355.nupkg
+      ES.EdiInterface_Release.2.0.2.1355.nupkg
+      ...
+  src\
+  nuget.config
+```
+
+`nuget.config` points NuGet at that folder. Everything else (other NuGet packages) is downloaded
+from nuget.org on the first build. liblsl (`lsl.dll`, v1.16, x64) is already in
+`src\AntLslStreamer\native`. Replace it with a newer [liblsl release](https://github.com/sccn/liblsl/releases) if you want.
+
+### 4. Build
+
+To build a ready-to-run folder in `dist\`, run:
+
+```powershell
+dotnet publish src\AntLslStreamer -c Release -o dist -p:Version=1.0.0
+```
+
+`-p:Version` sets the app version, which also appears in the LSL stream metadata
+(`acquisition/application`). Without it, the version is `1.0.0`. `dist\` holds everything the app
+needs except the runtimes listed in [Requirements](#requirements).
+
+During development you can run directly from the source:
+
+```powershell
+dotnet run --project src\AntLslStreamer -c Release -- list
+```
+
+Arguments after `--` are passed to the app.
+
+### 5. Check the build
+
+Without an amplifier, using the file simulator and the test inlet:
+
+```powershell
+Start-Process .\dist\AntLslStreamer.exe -ArgumentList '--sim','sim\trigger_test.cnt','-d','20'
+.\dist\AntLslStreamer.exe inlet -d 10
+```
+
+The inlet should report about 500 Hz and print trigger markers. With the amplifier connected,
+`.\dist\AntLslStreamer.exe list` should show it.
+
+### 6. Package for a release (optional)
+
+```powershell
+Compress-Archive -Path dist\* -DestinationPath AntLslStreamer-v1.0.0-win-x64.zip -Force
+```
+
+The zip contains ANT's SDK libraries. Check ANT's SDK license before sharing it publicly.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `Unable to find package ES.CtkImpl_Release` (NU1101) | The SDK is missing or in the wrong place; see step 3 |
+| NuGet restore fails with odd path errors | Clone into a shorter path |
+| Warning `MSB3246 ... PE image does not have metadata` | Harmless: an ANT package ships native DLLs where NuGet expects .NET ones |
+| A new ANT SDK version is not picked up | Update `EdiNugetVersion` in `AntLslStreamer.csproj`, then run `dotnet nuget locals all --clear` |
+| `lsl.dll not found` at startup | Run from `dist\` (or the `bin\` output). `lsl.dll` must be next to the exe |
 
 ## Code layout
 

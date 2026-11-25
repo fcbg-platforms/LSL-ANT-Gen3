@@ -64,6 +64,7 @@ Run from the `dist/` folder (or `src/AntLslStreamer/bin/Release/...`):
 .\AntLslStreamer.exe --cap CA-208              # stream with the electrode labels of a waveguard CA-208
 .\AntLslStreamer.exe -c NA-265 -r 1000 --referential-only
 .\AntLslStreamer.exe inlet -d 10               # built-in test inlet: resolve + read for 10 s
+.\AntLslStreamer.exe inlet -d 10 --stats       # ... and print mean, SD, min, max and NaN count of every channel
 ```
 
 Options (`AntLslStreamer help` lists all of them):
@@ -83,6 +84,20 @@ Options (`AntLslStreamer help` lists all of them):
 | `--volts` | Stream volts instead of µV |
 | `--sim <file.cnt> [--sim-type EE_225]` | Use the EDI2 file simulator instead of USB (e.g. `sim\trigger_test.cnt`) |
 | `-d, --duration <s>` | Stop after N seconds |
+
+### eego hub (ES-356 / ES-357)
+
+EDI2 shows an eego hub as separate modules, not as one amplifier. An ES-357 is one **M04111** (hub
+port 1: 64 referential + 10 bipolar channels) and three **M04112** (ports 2–4: 64 referential
+channels each). The streamer streams **one module**. Without `--serial` it picks the M04111, so the
+bipolar channels are included. To stream another module, pass its serial (`list` shows all of them):
+
+```powershell
+.\AntLslStreamer.exe --cap NA-265 --serial 04112-030005-004017
+```
+
+Streaming all modules together as one synchronised stream (cascading) is not supported yet. Tested on
+2026-11-23/25 with an ES-357 over USB, M04111 only: 75 channels (64 EEG, 10 BIP, STIM) at 500 Hz.
 
 ### EEG caps
 
@@ -109,6 +124,26 @@ also written to the stream metadata as `cap/reference` and `cap/ground`.
 To add another cap, add an entry in `src/AntLslStreamer/Caps.cs`, or use `--labels <file>`.
 
 EDI2 writes its own log to `%LOCALAPPDATA%\AntLslStreamer\logs`. Set `ANTLSL_DEBUG=1` to log every trigger.
+
+### Streaming to another computer
+
+LSL streams reach other computers on the network without any extra setup. One pitfall seen with a
+direct Ethernet cable between two PCs that also have other networks (Wi-Fi, a second adapter): the
+stream is **found** but cannot be **opened**. The reading program hangs; `bsl_stream_viewer`, for
+example, never opens its window. The streaming PC advertised an IPv4 address of its *other* network,
+which the reading PC could not reach, while the cable's IPv6 link-local address worked.
+
+Fix on the **reading** computer: make liblsl use IPv6 only, by putting a file named `lsl_api.cfg`
+with this content in the folder you start the program from (or in `%USERPROFILE%\lsl_api\` for every
+program of that user):
+
+```ini
+[ports]
+IPv6 = force
+```
+
+Use this only for such a direct-cable setup. On a normal network without IPv6, it stops LSL from
+connecting.
 
 ## Build
 

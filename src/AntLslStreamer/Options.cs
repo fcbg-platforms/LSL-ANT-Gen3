@@ -38,6 +38,7 @@ internal sealed class Options
     // ---- inlet test ----
     public string InletType { get; private set; } = "EEG";
     public string? InletName { get; private set; }
+    public bool Stats { get; private set; }
 
     public const string Usage = """
         AntLslStreamer - stream an ANT Neuro eego amplifier (EDI2 SDK) to Lab Streaming Layer
@@ -72,6 +73,7 @@ internal sealed class Options
           --type <type>              Stream type to resolve (default: EEG)
           -n, --name <name>          Stream name to resolve (overrides --type)
           -d, --duration <s>         How long to read (default: 10)
+          --stats                    Print mean, sd, min, max and NaN count of every channel
         """;
 
     public static Options Parse(string[] args)
@@ -118,6 +120,7 @@ internal sealed class Options
                 case "-d": case "--duration": o.Duration = NextDouble(); break;
                 case "--log-dir": o.LogDir = Next(); break;
                 case "--type": o.InletType = Next(); break;
+                case "--stats": o.Stats = true; break;
                 default: throw new ArgumentException($"Unknown option '{a}'");
             }
         }

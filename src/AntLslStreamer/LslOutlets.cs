@@ -31,7 +31,7 @@ internal sealed class LslOutlets : IDisposable
     public bool HasMarkers => _markerOutlet != IntPtr.Zero;
 
     public LslOutlets(string name, string sourceId, IReadOnlyList<StreamChannel> channels,
-        DeviceDescription device, bool withMarkers)
+        DeviceDescription device, bool withMarkers, ImpedanceResult? impedance = null)
     {
         Name = name;
         SourceId = sourceId;
@@ -75,6 +75,8 @@ internal sealed class LslOutlets : IDisposable
         foreach (var kv in device.Ranges)
             Lsl.lsl_append_child_value(ranges, kv.Key.ToLowerInvariant(), kv.Value.ToString(CultureInfo.InvariantCulture));
 
+        if (impedance != null) AppendImpedance(desc, impedance);
+
         // chunk_size 0 = sender decides; buffer up to 360 s for slow consumers
         _eegOutlet = Lsl.lsl_create_outlet(_eegInfo, 0, 360);
         if (_eegOutlet == IntPtr.Zero) throw new InvalidOperationException("lsl_create_outlet failed");
@@ -90,6 +92,34 @@ internal sealed class LslOutlets : IDisposable
             Lsl.lsl_append_child_value(Lsl.lsl_append_child(mdesc, "acquisition"), "eeg_source_id", sourceId);
             _markerOutlet = Lsl.lsl_create_outlet(_markerInfo, 0, 360);
         }
+    }
+
+    /// <summary>
+    /// Writes the pre-stream impedances into the header (so they end up in the XDF file):
+    /// desc/impedance/{unit, measured_at, frames, method, channels/channel*, reference*, ground*}.
+    /// </summary>
+    private static void AppendImpedance(IntPtr desc, ImpedanceResult imp)
+    {
+        IntPtr node = Lsl.lsl_append_child(desc, "impedance");
+        Lsl.lsl_append_child_value(node, "unit", "ohms");
+        Lsl.lsl_append_child_value(node, "measured_at", imp.MeasuredAt.ToString("o", CultureInfo.InvariantCulture));
+        Lsl.lsl_append_child_value(node, "frames", imp.Frames.ToString(CultureInfo.InvariantCulture));
+        Lsl.lsl_append_child_value(node, "method", "median of EDI2 impedance frames, first frame dropped");
+
+        static void Write(IntPtr parent, string element, ImpedanceValue v)
+        {
+            IntPtr e = Lsl.lsl_append_child(parent, element);
+            Lsl.lsl_append_child_value(e, "label", v.Label);
+            if (v.AmplifierIndex is int idx)
+                Lsl.lsl_append_child_value(e, "amplifier_index", idx.ToString(CultureInfo.InvariantCulture));
+            Lsl.lsl_append_child_value(e, "value", v.Ohms.ToString("R", CultureInfo.InvariantCulture));
+            Lsl.lsl_append_child_value(e, "state", v.State);
+        }
+
+        IntPtr chns = Lsl.lsl_append_child(node, "channels");
+        foreach (var c in imp.Channels) Write(chns, "channel", c);
+        foreach (var r in imp.Reference) Write(node, "reference", r);
+        foreach (var g in imp.Ground) Write(node, "ground", g);
     }
 
     /// <summary>Push a multiplexed chunk; <paramref name="lastSampleTime"/> is the LSL time of the last sample.</summary>

@@ -77,6 +77,8 @@ Options (`AntLslStreamer help` lists all of them):
 | `-c, --cap <cap>` | Connected EEG cap: `CA-208` or `NA-265` (also accepts `ca208`, `208`, ...). Labels the 64 referential channels |
 | `--labels <file>` | Channel labels, one per line (or comma separated), in stream order. Takes precedence over `--cap`. Default `EEG1..`, `BIP1..` |
 | `--serial <serial>` | Choose an amplifier when several are connected |
+| `--buffer <s>` / `--ready <percent>` | Amplifier-side buffer length (default 1 s) and fill level at which data is handed over (default 1 %). Chunk duration ≈ buffer × ready / 100: the default gives ~10–16 ms chunks (p95 latency ~2–5 ms on an EE-225 at 1000 Hz). `--buffer 5` (~56 ms chunks, p95 latency 30–45 ms) was the previous default |
+| `--impedance <s>` | Measure impedances for this long before streaming and store them in the stream header (default 5; `0` = skip). See [Impedances](#impedances) |
 | `-n, --name`, `--source-id` | Override LSL name / source id |
 | `--no-markers` | Do not create the trigger marker stream |
 | `--no-stim` | Do not add the `STIM` trigger channel to the EEG stream |
@@ -232,6 +234,54 @@ The 1 ms jitter matches the 2 ms sample period at 500 Hz plus serial-port jitter
 run the streamer with `ANTLSL_DEBUG=1`: it logs each trigger's amplifier timestamps and whether the
 amplifier clock was used.
 
+## Timestamps
+
+EEG samples are timestamped from the sample counter (`t0 + n / rate`), not from the arrival time of each
+chunk. Stamping every chunk with its arrival time copied the USB/SDK delivery jitter into the timestamps
+and occasionally made them step backwards between chunks (up to 10 backward steps per 30 s at 2000 Hz on
+an EE-225). The offset `t0` is estimated from the arrival times: as a running mean during the first 5 s,
+then with a 20 s time constant and a slew limit, so it follows the slow drift between the amplifier and
+PC clocks but not the delivery jitter. Timestamps always increase. After a sample-loss event, or when
+arrival and sample count disagree by more than 0.5 s, the clock is re-anchored (logged as a warning).
+
+Measured on an EE-225 over USB (30 s, inlet without post-processing):
+
+| | before | after |
+|---|---|---|
+| backward timestamp steps (500 / 1000 / 2000 Hz) | 0 / 1–6 / 10 | 0 / 0 / 0 |
+| timestamp jitter vs. linear fit, peak-to-peak | 1.3–2.6 ms | 0.01–0.3 ms |
+
+The streamer's 10 s status line reports the largest arrival jitter it absorbed.
+
+## Impedances
+
+Before the first EEG start the amplifier is put in impedance mode for `--impedance` seconds (default 5).
+The first frame is a settling transient and is dropped; the median of the remaining frames
+(~1 frame/s, so about 2–4 frames with the default 5 s; use e.g. `--impedance 10` for more) is written into the EEG stream header, so it is stored in the XDF file:
+
+```xml
+<desc>
+  <impedance>
+    <unit>ohms</unit>
+    <measured_at>2026-11-27T10:13:54.215+01:00</measured_at>
+    <frames>2</frames>
+    <method>median of EDI2 impedance frames, first frame dropped</method>
+    <channels>
+      <channel><label>Fp1</label><amplifier_index>0</amplifier_index><value>4210</value><state>Connected</state></channel>
+      ...
+    </channels>
+    <reference><label>REF</label><value>3120</value><state>Connected</state></reference>
+    <ground><label>GND</label><value>2950</value><state>Connected</state></ground>
+  </impedance>
+</desc>
+```
+
+All referential electrodes are listed (labelled as in the stream / `--cap`), also when `--channels`
+streams only a subset. The values and the summary in the log are in ohms as reported by EDI2.
+With no cap attached the EE-225 reported ~32 kΩ for every electrode (the measurement ceiling) and
+`Connected` for all of them, so do not rely on `state`. Not measured with the file simulator or after a
+reconnect (the header of an existing stream cannot change).
+
 ## Known limitations / not yet verified
 
 - Triggers are reported only when the trigger input changes to a non-zero code. Returning to 0 produces
@@ -239,5 +289,6 @@ amplifier clock was used.
 - The constant latency between sending a trigger and its marker timestamp (about 6 ms in the test above)
   includes the serial/Arduino delay and the amplifier-to-PC delay. Measure it for your setup if you
   align markers with other LSL streams to better than 10 ms.
-- Impedance mode is not exposed. Check impedances with the eego software before streaming.
+- Impedances are measured only once, before streaming (no live impedance stream). The ohm values were
+  checked without a cap only; compare them once against the eego software with a cap on a head/phantom.
 - Only one amplifier is streamed. Cascaded (multi-amplifier) setups are not configured.

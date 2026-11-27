@@ -19,6 +19,7 @@ internal sealed class Streamer
     private readonly CancellationToken _ct;
     private LslOutlets? _outlets;
     private volatile bool _detached;
+    private ImpedanceResult? _impedance; // measured once, before the first outlet is created
 
     // Trigger de-duplication: EDI2 reports the same time marker in several consecutive frames (sliding
     // window). A marker is considered a repeat if the identical (time, code) was seen in the last 10 s.
@@ -360,9 +361,13 @@ internal sealed class Streamer
             SamplingRate = rate,
             ActiveChannels = selected.Select(c => c.ChannelIndex).ToList(),
             Ranges = ranges,
-            BufferSize = (int)Math.Round(rate * 5), // 5 s amplifier-side buffer
-            DataReadyPercentage = 1,
+            // Amplifier-side buffer; data is handed over each time DataReadyPercentage of it is filled, so
+            // the chunk duration (and minimum latency) is about BufferSeconds * ReadyPercent / 100.
+            BufferSize = (int)Math.Round(rate * _opt.BufferSeconds),
+            DataReadyPercentage = _opt.ReadyPercent,
         };
+        Log.Info($"Amplifier buffer {_opt.BufferSeconds.ToString(CultureInfo.InvariantCulture)} s ({sp.BufferSize} samples), " +
+                 $"data ready at {_opt.ReadyPercent}% -> ~{_opt.BufferSeconds * _opt.ReadyPercent * 10:F0} ms chunks.");
 
         var device = new DeviceDescription(info.AmplifierType.ToString(), info.Serial ?? "", rate,
             ranges.ToDictionary(k => k.Key.ToString(), k => k.Value), SdkVersion, _opt.Cap);
@@ -384,14 +389,40 @@ internal sealed class Streamer
         Log.Info($"Amplifier {device.Model} serial {device.Serial}: {channels.Count} channels @ {sp.SamplingRate} Hz, " +
                  $"ranges {string.Join(", ", sp.Ranges.Select(kv => $"{kv.Key}={kv.Value.ToString(CultureInfo.InvariantCulture)} V"))}");
 
+        // Impedances go into the stream header, which cannot change later: measure only before the first
+        // outlet exists (not after a reconnect that keeps the outlet), and not with the file simulator.
+        if (_opt.ImpedanceSeconds > 0 && _outlets == null && _impedance == null && _opt.SimFile == null)
+        {
+            var referential = amp.GetChannelsAvailable().Where(c => c.ChannelPolarity == ChannelPolarity.Referential)
+                .Select(c => c.ChannelIndex).ToList();
+            (string, int?) Label(int i)
+            {
+                int? idx = i < referential.Count ? referential[i] : null;
+                string? label = channels.FirstOrDefault(c => !c.IsStim && c.AmplifierIndex == idx)?.Label
+                                ?? (_opt.Cap != null ? Caps.Label(_opt.Cap, i) : null);
+                return (label ?? $"EEG{i + 1}", idx);
+            }
+            try
+            {
+                _impedance = Impedance.Measure(amp, _opt.ImpedanceSeconds, Label, _ct);
+            }
+            catch (Exception ex) when (!_ct.IsCancellationRequested)
+            {
+                Log.Warn($"Impedance measurement failed ({ex.GetType().Name}: {ex.Message}); streaming without impedances.");
+                TryIdle(amp);
+            }
+            if (_ct.IsCancellationRequested) return;
+        }
+
         amp.SetMode(AmplifierMode.Eeg, sp);
         Log.Info("EEG mode started.");
 
         float[] buffer = new float[channels.Count * (int)Math.Max(sp.SamplingRate, 1000)];
         double rate = sp.SamplingRate;
         var lastData = Stopwatch.StartNew();
-        var statTimer = Stopwatch.StartNew();
+        var statTimer = new Stopwatch(); // started at the first data, so the first rate report is not biased low
         long statSamples = 0;
+        var clock = new SampleClock(rate);
         int consecutiveErrors = 0;
         bool warnedRowMismatch = false;
 
@@ -408,7 +439,8 @@ internal sealed class Streamer
             catch (SampleLossException ex)
             {
                 _sampleLossEvents++;
-                Log.Warn($"Sample loss reported by amplifier: {ex.Message}");
+                Log.Warn($"Sample loss reported by amplifier: {ex.Message}. Timestamps will be re-anchored.");
+                clock.Reset(); // the sample count no longer matches elapsed time
                 continue;
             }
             catch (Exception ex) when (ex is not WrongAmplifierStateException && ++consecutiveErrors < 5)
@@ -429,6 +461,8 @@ internal sealed class Streamer
             }
             double now = Lsl.lsl_local_clock();
             lastData.Restart();
+            bool firstChunk = !statTimer.IsRunning;
+            if (firstChunk) statTimer.Start();
 
             int nch = channels.Count;
             int stimIdx = channels.FindIndex(c => c.IsStim);       // -1 if there is no STIM channel
@@ -463,8 +497,10 @@ internal sealed class Streamer
             }
 
             // Trigger markers: written into the STIM channel of this chunk (before it is pushed) and
-            // sent on the marker stream. "now" is the LSL time of the chunk's last sample.
-            double firstSampleLsl = now - (total - 1) / rate;
+            // sent on the marker stream. Sample times come from the sample counter (see SampleClock), not
+            // from the arrival time, so they are evenly spaced and never step backwards between chunks.
+            double firstSampleLsl = clock.Stamp(total, now);
+            double lastSampleLsl = firstSampleLsl + (total - 1) / rate;
             s0 = 0;
             foreach (var f in eegFrames)
             {
@@ -474,7 +510,7 @@ internal sealed class Streamer
                 if (f.TimeMarkers != null)
                     foreach (var tm in f.TimeMarkers)
                     {
-                        var marker = HandleMarker(tm, f, frameStartLsl, frameDuration, now);
+                        var marker = HandleMarker(tm, f, frameStartLsl, frameDuration, lastSampleLsl);
                         if (marker is not { } mk || stimIdx < 0) continue;
                         int idx = (int)Math.Round((mk.Timestamp - firstSampleLsl) * rate);
                         if (idx < 0)
@@ -505,16 +541,18 @@ internal sealed class Streamer
                 s0 += ns;
             }
 
-            // The newest sample was received "now"; LSL back-computes the earlier stamps from the nominal rate.
-            _outlets!.PushChunk(buffer, total, now);
+            // LSL back-computes the earlier stamps of the chunk from the nominal rate.
+            _outlets!.PushChunk(buffer, total, lastSampleLsl);
 
             _samples += total;
-            statSamples += total;
+            if (!firstChunk) statSamples += total; // the first chunk is backlog from before the timer started
             if (statTimer.Elapsed.TotalSeconds >= 10)
             {
                 double eff = statSamples / statTimer.Elapsed.TotalSeconds;
                 Log.Info($"Streaming: {_samples} samples ({eff:F1} Hz effective), {_markers} markers, " +
-                         $"consumers={(_outlets.HaveConsumers ? "yes" : "no")}" +
+                         $"consumers={(_outlets.HaveConsumers ? "yes" : "no")}, " +
+                         $"max arrival jitter {clock.TakeMaxAbsError() * 1000:F1} ms" +
+                         (clock.Resyncs > 0 ? $", clock re-anchors={clock.Resyncs}" : "") +
                          (_sampleLossEvents > 0 ? $", sample-loss events={_sampleLossEvents}" : ""));
                 if (Math.Abs(eff - rate) > 0.05 * rate)
                     Log.Warn($"Effective rate {eff:F1} Hz differs from nominal {rate} Hz.");
@@ -532,7 +570,7 @@ internal sealed class Streamer
             Log.Warn("Channel layout changed; re-creating the LSL outlet.");
             _outlets.Dispose();
         }
-        _outlets = new LslOutlets(name, sourceId, channels, device, _opt.Markers);
+        _outlets = new LslOutlets(name, sourceId, channels, device, _opt.Markers, _impedance);
         Log.Info($"LSL outlet '{name}' (type EEG, {channels.Count} ch, {device.SamplingRate} Hz, float32, " +
                  $"{channels[0].Unit}, source_id '{sourceId}') is live." +
                  (_outlets.HasMarkers ? $" Triggers on '{name} Markers' (type Markers)." : ""));

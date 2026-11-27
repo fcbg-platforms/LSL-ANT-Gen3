@@ -18,6 +18,9 @@ internal sealed class Options
     public string? Serial { get; private set; }
     public string? LabelsFile { get; private set; }
     public string? Cap { get; private set; }
+    public double BufferSeconds { get; private set; } = 1;
+    public int ReadyPercent { get; private set; } = 1;
+    public double ImpedanceSeconds { get; private set; } = 5; // ~1 frame/s, first one dropped -> ~4 frames
 
     // ---- LSL ----
     public string? StreamName { get; private set; }
@@ -57,6 +60,11 @@ internal sealed class Options
           -c, --cap <cap>            EEG cap connected to the amplifier: CA-208 or NA-265 (64-ch waveguard).
                                      Sets the electrode labels of the referential channels.
           --labels <file>            Text file with one channel label per line (or comma separated), in stream order
+          --buffer <s>               Amplifier-side buffer length in seconds (default: 1)
+          --ready <percent>          Hand data over when this % of the buffer is filled, 1-100 (default: 1).
+                                     Chunk duration / minimum latency is about buffer * ready / 100.
+          --impedance <s>            Measure impedances for this long before streaming and store them in the
+                                     stream header (default: 5; 0 = skip)
           --serial <serial>          Use the amplifier with this serial if several are connected
           -n, --name <name>          LSL stream name (default: "eego <model> <serial>")
           --source-id <id>           LSL source id (default: "ANT-eego-<serial>")
@@ -107,6 +115,18 @@ internal sealed class Options
                 case "--referential-only": o.ReferentialOnly = true; break;
                 case "--labels": o.LabelsFile = Next(); break;
                 case "-c": case "--cap": o.Cap = Caps.Normalize(Next()); break;
+                case "--buffer":
+                    o.BufferSeconds = NextDouble();
+                    if (o.BufferSeconds <= 0 || o.BufferSeconds > 60) throw new ArgumentException("--buffer must be in (0, 60] seconds");
+                    break;
+                case "--ready":
+                    o.ReadyPercent = int.Parse(Next(), CultureInfo.InvariantCulture);
+                    if (o.ReadyPercent < 1 || o.ReadyPercent > 100) throw new ArgumentException("--ready must be between 1 and 100");
+                    break;
+                case "--impedance":
+                    o.ImpedanceSeconds = NextDouble();
+                    if (o.ImpedanceSeconds < 0 || o.ImpedanceSeconds > 600) throw new ArgumentException("--impedance must be in [0, 600] seconds");
+                    break;
                 case "--serial": o.Serial = Next(); break;
                 case "-n": case "--name": o.StreamName = Next(); o.InletName = o.StreamName; break;
                 case "--source-id": o.SourceId = Next(); break;

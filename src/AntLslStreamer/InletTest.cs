@@ -34,11 +34,16 @@ internal static class InletTest
 
         IntPtr inlet = Lsl.lsl_create_inlet(info, 360, 0, 1);
         int stimCh = -1;
+        var chLabels = new List<string>();
+        var chTypes = new List<string>();
         IntPtr fullInfo = Lsl.lsl_get_fullinfo(inlet, 5.0, out int ec);
         if (ec == 0 && fullInfo != IntPtr.Zero)
         {
             string xml = Lsl.TakeString(Lsl.lsl_get_xml(fullInfo));
             var labels = Regex.Matches(xml, "<label>(.*?)</label>").Select(m => m.Groups[1].Value).ToList();
+            chLabels = labels;
+            chTypes = Regex.Matches(xml, "<channel>.*?<type>(.*?)</type>", RegexOptions.Singleline)
+                .Select(m => m.Groups[1].Value).ToList();
             stimCh = labels.IndexOf("STIM");
             var unit = Regex.Match(xml, "<unit>(.*?)</unit>").Groups[1].Value;
             var model = Regex.Match(xml, "<model>(.*?)</model>").Groups[1].Value;
@@ -72,6 +77,9 @@ internal static class InletTest
         int showCh = nch;
         var sum = new double[showCh];
         var sumSq = new double[showCh];
+        var min = Enumerable.Repeat(double.PositiveInfinity, showCh).ToArray();
+        var max = Enumerable.Repeat(double.NegativeInfinity, showCh).ToArray();
+        var nans = new long[showCh];
         var sw = Stopwatch.StartNew();
         var report = Stopwatch.StartNew();
         var mbuf = new IntPtr[1];
@@ -94,8 +102,11 @@ internal static class InletTest
                 for (int c = 0; c < showCh; c++)
                 {
                     double v = data[s * nch + c];
+                    if (double.IsNaN(v)) { nans[c]++; continue; }
                     sum[c] += v;
                     sumSq[c] += v * v;
+                    if (v < min[c]) min[c] = v;
+                    if (v > max[c]) max[c] = v;
                 }
             }
             total += ns;
@@ -124,11 +135,19 @@ internal static class InletTest
             Log.Info($"timestamp span {span:F3} s -> measured rate {(total - 1) / span:F2} Hz (nominal {srate} Hz), " +
                      $"max timestamp gap {maxGap * 1000:F1} ms, time correction {tc * 1000:F2} ms");
             var sds = new double[showCh];
+            if (opt.Stats)
+                Log.Info($"  {"#",3} {"label",-8} {"type",-5} {"mean",12} {"sd",12} {"min",12} {"max",12} {"NaN",6}");
             for (int c = 0; c < showCh; c++)
             {
-                double mean = sum[c] / total;
-                sds[c] = Math.Sqrt(Math.Max(0, sumSq[c] / total - mean * mean));
-                if (c < 4) Log.Info($"  ch{c}: mean {mean:G5}, sd {sds[c]:G5}");
+                long valid = total - nans[c];
+                double mean = valid > 0 ? sum[c] / valid : double.NaN;
+                sds[c] = valid > 0 ? Math.Sqrt(Math.Max(0, sumSq[c] / valid - mean * mean)) : 0;
+                string label = c < chLabels.Count ? chLabels[c] : $"ch{c}";
+                string type = c < chTypes.Count ? chTypes[c] : "";
+                if (opt.Stats)
+                    Log.Info($"  {c,3} {label,-8} {type,-5} {mean,12:G5} {sds[c],12:G5} {min[c],12:G5} {max[c],12:G5} {nans[c],6}");
+                else if (c < 4)
+                    Log.Info($"  ch{c}: mean {mean:G5}, sd {sds[c]:G5}");
             }
             int distinct = sds.Select(v => Math.Round(v, 6)).Distinct().Count();
             Log.Info($"  sd across all {showCh} channels: min {sds.Min():G4}, max {sds.Max():G4} " +

@@ -96,6 +96,9 @@ internal sealed class Streamer
         foreach (var d in devices)
             Console.WriteLine($"Amplifier: {d.AmplifierType}  serial={d.Serial}  key={d.Key}");
 
+        if (devices.Count > 1)
+            Console.WriteLine($"Details below are for {devices[0].AmplifierType} {devices[0].Serial} " +
+                              "(the one streamed by default). Use --serial to see another.");
         ctl.CreateDevice(new List<DeviceInfo> { devices[0] }, null);
         var amp = ctl.Amplifier ?? throw new InvalidOperationException("EDI2 did not create the amplifier.");
         try
@@ -172,7 +175,10 @@ internal sealed class Streamer
 
         if (opt.Serial != null)
             devices = devices.Where(d => string.Equals(d.Serial, opt.Serial, StringComparison.OrdinalIgnoreCase)).ToList();
-        return devices;
+
+        // An eego hub (ES-356/ES-357) appears as separate modules. Put the M04111 (hub port 1) first: it is
+        // the module with the bipolar channels, while the M04112 modules (ports 2-4) have only referential ones.
+        return devices.OrderBy(d => d.AmplifierType == EegDeviceType.M04111 ? 0 : 1).ToList();
     }
 
     /// <summary>Blocks until an amplifier is available (or cancellation) and returns it.</summary>
